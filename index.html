@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Booking Email Collector</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&family=Spline+Sans+Mono:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">Email subject filter</p>
+          <h1>New Public booking link</h1>
+        </div>
+        <div class="filter-pill" aria-label="Active email subject filter">
+          Active filter
+        </div>
+      </header>
+
+      <section class="panel inbox-panel" aria-label="Connected inboxes">
+        <div class="table-header">
+          <div class="section-heading">
+            <p class="eyebrow">Live inbox sync</p>
+            <h2>Connected email accounts</h2>
+          </div>
+          <div class="button-row compact">
+            <button class="primary-button" type="button" id="connectGmailButton">
+              Connect Gmail
+            </button>
+            <button class="ghost-button" type="button" id="syncNowButton" disabled>
+              Sync now
+            </button>
+          </div>
+        </div>
+
+        <div class="accounts-list" id="accountsList"></div>
+        <p class="empty-state visible" id="accountsEmpty">
+          No email accounts connected yet.
+        </p>
+
+        <div class="message-box live-message" id="liveMessage">
+          Start the local server and connect Gmail to extract booking emails
+          automatically.
+        </div>
+      </section>
+
+      <section class="workspace-grid" aria-label="Booking extraction workspace">
+        <form class="panel input-panel" id="emailForm">
+          <div class="section-heading">
+            <p class="eyebrow">Incoming email</p>
+            <h2>Paste booking email</h2>
+          </div>
+
+          <label for="emailInput">Email content</label>
+          <textarea
+            id="emailInput"
+            name="emailInput"
+            placeholder="Subject: New Public booking link&#10;&#10;Guest Name: Ada Okafor&#10;Property Name: Lekki Waterside Apartment&#10;Property ID: LW-204&#10;Check-In Date: 12 April 2026&#10;Check-Out Date: 15 April 2026&#10;Nights: 3&#10;Booking Reference: PB-91820&#10;&#10;Total Booking Value: ₦250,000&#10;Caution Fee: ₦50,000&#10;Reeka Fee: ₦20,000&#10;Date: 8 April 2026&#10;Status: Unpaid"
+            spellcheck="false"
+          ></textarea>
+
+          <div class="button-row">
+            <button class="primary-button" type="submit">Extract and add</button>
+            <button class="ghost-button" type="button" id="sampleButton">
+              Use sample
+            </button>
+            <button class="ghost-button" type="button" id="clearInputButton">
+              Clear
+            </button>
+          </div>
+
+          <p class="helper-copy">
+            Works with pasted text or simple HTML email content. Connected Gmail
+            inboxes can sync matching booking emails automatically.
+          </p>
+        </form>
+
+        <section class="panel extraction-panel" aria-live="polite">
+          <div class="section-heading">
+            <p class="eyebrow">Copy-ready output</p>
+            <h2>Booking details</h2>
+          </div>
+
+          <label for="bookingDetailsOutput">Ready to copy</label>
+          <textarea
+            class="copy-output"
+            id="bookingDetailsOutput"
+            readonly
+            spellcheck="false"
+          ></textarea>
+
+          <div class="button-row">
+            <button class="ghost-button" type="button" id="copyDetailsButton" disabled>
+              Copy booking details
+            </button>
+          </div>
+
+          <div class="message-box" id="parserMessage">
+            Paste a booking email to collect its details.
+          </div>
+        </section>
+      </section>
+
+      <section class="panel collected-panel">
+        <div class="table-header">
+          <div class="section-heading">
+            <p class="eyebrow">Collected records</p>
+            <h2>Booking list</h2>
+          </div>
+          <div class="button-row compact">
+            <button class="ghost-button" type="button" id="exportButton">
+              Export CSV
+            </button>
+            <button class="danger-button" type="button" id="clearRecordsButton">
+              Clear records
+            </button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Date</th>
+                <th scope="col">Total Booking Value</th>
+                <th scope="col">Caution Fee</th>
+                <th scope="col">Reeka Fee</th>
+                <th scope="col">Status</th>
+                <th scope="col">Collected</th>
+              </tr>
+            </thead>
+            <tbody id="recordsBody"></tbody>
+          </table>
+        </div>
+
+        <p class="empty-state" id="emptyState">No booking records collected yet.</p>
+      </section>
+    </main>
+
+    <script src="./parser.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
