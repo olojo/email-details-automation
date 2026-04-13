@@ -29,6 +29,7 @@ let records = loadRecords();
 let accounts = [];
 let apiAvailable = false;
 let autoSyncTimer = null;
+let activeRecordMenuId = null;
 
 resetPreview();
 renderRecords();
@@ -59,6 +60,8 @@ function bindEvents() {
   copyDetailsButton.addEventListener("click", copyBookingDetails);
   exportButton.addEventListener("click", exportCsv);
   clearRecordsButton.addEventListener("click", clearRecords);
+  document.addEventListener("click", handleDocumentClick);
+  document.addEventListener("keydown", handleDocumentKeydown);
 }
 
 function handleExtraction() {
@@ -292,12 +295,7 @@ async function copyBookingDetails() {
   }
 
   try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      copyBookingDetailsWithFallback();
-    }
-
+    await copyTextToClipboard(text);
     setMessage("Booking details copied.", "success");
   } catch {
     copyBookingDetailsWithFallback();
@@ -356,6 +354,7 @@ function renderRecords() {
       createCell(record.reekaFee || "Not found", "number-cell"),
       createStatusCell(record),
       createCell(formatOptionalDate(record.collectedAt), "number-cell"),
+      createActionsCell(record),
     );
 
     recordsBody.appendChild(row);
@@ -399,6 +398,83 @@ function createStatusCell(record) {
 
   cell.appendChild(select);
   return cell;
+}
+
+function createActionsCell(record) {
+  const cell = document.createElement("td");
+  const wrap = document.createElement("div");
+  const button = document.createElement("button");
+  const icon = document.createElement("span");
+
+  cell.className = "actions-cell";
+  wrap.className = "record-menu-wrap";
+  button.className = "more-button";
+  button.type = "button";
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", String(activeRecordMenuId === record.id));
+  button.setAttribute("aria-label", "More actions");
+  icon.className = "more-icon";
+
+  for (let index = 0; index < 3; index += 1) {
+    const dot = document.createElement("span");
+    dot.className = "more-dot";
+    icon.appendChild(dot);
+  }
+
+  button.appendChild(icon);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    activeRecordMenuId = activeRecordMenuId === record.id ? null : record.id;
+    renderRecords();
+  });
+
+  wrap.appendChild(button);
+
+  if (activeRecordMenuId === record.id) {
+    wrap.appendChild(createRecordMenu(record));
+  }
+
+  cell.appendChild(wrap);
+  return cell;
+}
+
+function createRecordMenu(record) {
+  const menu = document.createElement("div");
+  const copyButton = document.createElement("button");
+  const deleteButton = document.createElement("button");
+
+  menu.className = "record-menu";
+  menu.setAttribute("role", "menu");
+
+  copyButton.className = "record-menu-item";
+  copyButton.type = "button";
+  copyButton.textContent = "Copy";
+  copyButton.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    activeRecordMenuId = null;
+    renderLatestBooking(record, hasBookingDetails(record));
+
+    try {
+      await copyTextToClipboard(formatBookingDetails(record));
+      setMessage("Booking record copied.", "success");
+    } catch {
+      copyBookingDetailsWithFallback();
+      setMessage("Booking record copied.", "success");
+    }
+
+    renderRecords();
+  });
+
+  deleteButton.className = "record-menu-item record-menu-delete";
+  deleteButton.type = "button";
+  deleteButton.textContent = "Delete";
+  deleteButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    deleteRecord(record.id);
+  });
+
+  menu.append(copyButton, deleteButton);
+  return menu;
 }
 
 function setStatusSelectClass(select) {
@@ -480,8 +556,10 @@ function clearRecords() {
   }
 
   records = [];
+  activeRecordMenuId = null;
   saveRecords();
   renderRecords();
+  resetPreview();
   setMessage("Collected records cleared.", "neutral");
 }
 
@@ -519,6 +597,28 @@ function stopAutoSync() {
 
   window.clearInterval(autoSyncTimer);
   autoSyncTimer = null;
+}
+
+function handleDocumentClick(event) {
+  if (!activeRecordMenuId) {
+    return;
+  }
+
+  if (event.target.closest(".record-menu-wrap")) {
+    return;
+  }
+
+  activeRecordMenuId = null;
+  renderRecords();
+}
+
+function handleDocumentKeydown(event) {
+  if (event.key !== "Escape" || !activeRecordMenuId) {
+    return;
+  }
+
+  activeRecordMenuId = null;
+  renderRecords();
 }
 
 function handleRedirectMessage() {
@@ -569,6 +669,57 @@ function formatOptionalDate(value) {
 function escapeCsvValue(value = "") {
   const safeValue = String(value ?? "");
   return `"${safeValue.replaceAll('"', '""')}"`;
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  bookingDetailsOutput.value = text;
+  copyBookingDetailsWithFallback();
+}
+
+function hasBookingDetails(record) {
+  return Boolean(
+    record.guestName ||
+      record.propertyName ||
+      record.propertyId ||
+      record.checkInDate ||
+      record.checkOutDate ||
+      record.nights ||
+      record.bookingReference,
+  );
+}
+
+function deleteRecord(recordId) {
+  const record = records.find((storedRecord) => storedRecord.id === recordId);
+
+  if (!record) {
+    return;
+  }
+
+  const confirmed = window.confirm("Delete this booking record?");
+
+  if (!confirmed) {
+    return;
+  }
+
+  records = records.filter((storedRecord) => storedRecord.id !== recordId);
+  activeRecordMenuId = null;
+  saveRecords();
+  renderRecords();
+
+  const nextRecord = records.find(hasBookingDetails);
+
+  if (nextRecord) {
+    renderLatestBooking(nextRecord, true);
+  } else {
+    resetPreview();
+  }
+
+  setMessage("Booking record deleted.", "success");
 }
 
 function loadRecords() {
