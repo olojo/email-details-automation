@@ -198,22 +198,57 @@ Status: Unpaid`;
   function findFieldValue(lines, labels) {
     for (const label of labels) {
       const labelPattern = createLabelPattern(label);
-      const pattern = new RegExp(
+      const inlinePattern = new RegExp(
         `^\\s*${labelPattern}\\s*(?:#|no\\.?|number)?\\s*(?:[:\\-=]|is)?\\s*(.+)$`,
         "i",
       );
+      const labelOnlyPattern = new RegExp(
+        `^\\s*${labelPattern}\\s*(?:#|no\\.?|number)?\\s*(?:[:\\-=]|is)?\\s*$`,
+        "i",
+      );
 
-      const line = lines.find((candidate) => pattern.test(candidate));
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
 
-      if (line) {
-        const value = line.match(pattern)?.[1]?.trim();
-        if (value) {
-          return value;
+        if (inlinePattern.test(line)) {
+          const value = line.match(inlinePattern)?.[1]?.trim();
+          if (value) {
+            return value;
+          }
+        }
+
+        if (!labelOnlyPattern.test(line)) {
+          continue;
+        }
+
+        const nextLine = lines[index + 1];
+
+        if (nextLine && !isKnownFieldLabel(nextLine)) {
+          return nextLine.trim();
         }
       }
     }
 
     return "";
+  }
+
+  function isKnownFieldLabel(line) {
+    return allFields.some((field) =>
+      field.labels.some((label) => {
+        const labelPattern = createLabelPattern(label);
+        const knownLabelPattern = new RegExp(
+          `^\\s*${labelPattern}\\s*(?:#|no\\.?|number)?\\s*(?:[:\\-=]|is)?\\s*$`,
+          "i",
+        );
+
+        const inlineFieldPattern = new RegExp(
+          `^\\s*${labelPattern}\\s*(?:#|no\\.?|number)?\\s*(?:[:\\-=]|is)\\s*.+$`,
+          "i",
+        );
+
+        return knownLabelPattern.test(line) || inlineFieldPattern.test(line);
+      }),
+    );
   }
 
   function createLabelPattern(label) {
