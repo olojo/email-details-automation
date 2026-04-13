@@ -1,13 +1,12 @@
 import crypto from "node:crypto";
-import { createRequire } from "node:module";
 import { getStore } from "@netlify/blobs";
+import parser from "../../parser.js";
 
-const require = createRequire(import.meta.url);
 const {
   SUBJECT_FILTER,
   parseBookingEmail,
   normalizePaymentStatus,
-} = require("../../parser.js");
+} = parser;
 
 const DEFAULT_REFRESH_INTERVAL_MS = 15_000;
 const STORE_NAME = "booking-email-collector";
