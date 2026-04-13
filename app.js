@@ -1,5 +1,5 @@
 const STORAGE_KEY = "booking-email-records";
-const AUTO_SYNC_INTERVAL_MS = 60_000;
+const DEFAULT_REFRESH_INTERVAL_MS = 15_000;
 
 const {
   SAMPLE_EMAIL,
@@ -14,11 +14,12 @@ const bookingDetailsOutput = document.querySelector("#bookingDetailsOutput");
 const copyDetailsButton = document.querySelector("#copyDetailsButton");
 const sampleButton = document.querySelector("#sampleButton");
 const clearInputButton = document.querySelector("#clearInputButton");
-const connectGmailButton = document.querySelector("#connectGmailButton");
-const syncNowButton = document.querySelector("#syncNowButton");
-const accountsList = document.querySelector("#accountsList");
-const accountsEmpty = document.querySelector("#accountsEmpty");
-const liveMessage = document.querySelector("#liveMessage");
+const copyWebhookUrlButton = document.querySelector("#copyWebhookUrlButton");
+const copySecretButton = document.querySelector("#copySecretButton");
+const refreshRecordsButton = document.querySelector("#refreshRecordsButton");
+const webhookUrlValue = document.querySelector("#webhookUrlValue");
+const webhookSecretValue = document.querySelector("#webhookSecretValue");
+const automationMessage = document.querySelector("#automationMessage");
 const exportButton = document.querySelector("#exportButton");
 const clearRecordsButton = document.querySelector("#clearRecordsButton");
 const recordsBody = document.querySelector("#recordsBody");
@@ -26,16 +27,16 @@ const emptyState = document.querySelector("#emptyState");
 const parserMessage = document.querySelector("#parserMessage");
 
 let records = loadRecords();
-let accounts = [];
-let apiAvailable = false;
-let autoSyncTimer = null;
 let activeRecordMenuId = null;
+let apiAvailable = false;
+let refreshTimer = null;
+let refreshIntervalMs = DEFAULT_REFRESH_INTERVAL_MS;
+let refreshInFlight = false;
 
 resetPreview();
 renderRecords();
 bindEvents();
-handleRedirectMessage();
-refreshAccounts();
+initializeAutomation();
 
 function bindEvents() {
   form.addEventListener("submit", (event) => {
@@ -55,8 +56,18 @@ function bindEvents() {
     emailInput.focus();
   });
 
-  connectGmailButton.addEventListener("click", connectGmail);
-  syncNowButton.addEventListener("click", () => syncAccounts({ manual: true }));
+  copyWebhookUrlButton.addEventListener("click", () => {
+    copyAutomationValue(webhookUrlValue.textContent, "Webhook URL copied.");
+  });
+
+  copySecretButton.addEventListener("click", () => {
+    copyAutomationValue(webhookSecretValue.textContent, "Shared secret copied.");
+  });
+
+  refreshRecordsButton.addEventListener("click", () => {
+    refreshServerRecords({ silent: false });
+  });
+
   copyDetailsButton.addEventListener("click", copyBookingDetails);
   exportButton.addEventListener("click", exportCsv);
   clearRecordsButton.addEventListener("click", clearRecords);
@@ -64,7 +75,40 @@ function bindEvents() {
   document.addEventListener("keydown", handleDocumentKeydown);
 }
 
-function handleExtraction() {
+async function initializeAutomation() {
+  try {
+    const config = await apiRequest("/api/zapier/config");
+
+    apiAvailable = true;
+    refreshIntervalMs = Number(config.pollIntervalMs || DEFAULT_REFRESH_INTERVAL_MS);
+    webhookUrlValue.textContent = config.webhookUrl || "Unavailable";
+    webhookSecretValue.textContent = config.secret || "Unavailable";
+    copyWebhookUrlButton.disabled = false;
+    copySecretButton.disabled = false;
+    refreshRecordsButton.disabled = false;
+    setAutomationMessage(
+      "Zapier webhook is ready. This page refreshes server records automatically while it stays open.",
+      "success",
+    );
+
+    await refreshServerRecords({ silent: true });
+    startAutoRefresh();
+  } catch (error) {
+    apiAvailable = false;
+    webhookUrlValue.textContent = "Run npm start to expose the webhook URL.";
+    webhookSecretValue.textContent = "Starts when the Node server is running.";
+    copyWebhookUrlButton.disabled = true;
+    copySecretButton.disabled = true;
+    refreshRecordsButton.disabled = true;
+    setAutomationMessage(
+      error?.message ||
+        "Start the local Node server to use Zapier automation and shared record storage.",
+      "warning",
+    );
+  }
+}
+
+async function handleExtraction() {
   const rawEmail = emailInput.value.trim();
 
   if (!rawEmail) {
@@ -95,160 +139,109 @@ function handleExtraction() {
     collectedAt: new Date().toISOString(),
   };
 
-  records = [record, ...records];
-  saveRecords();
-  renderRecords();
-
-  const subjectNote = parsed.subjectMatched
-    ? "Subject matched."
-    : "Subject line was not found, but the booking fields were collected.";
-
-  setMessage(`${subjectNote} Booking details added to the tracker.`, "success");
-}
-
-async function refreshAccounts() {
   try {
-    const result = await apiRequest("/api/accounts");
-    apiAvailable = true;
-    accounts = result.accounts || [];
-    renderAccounts();
+    if (apiAvailable) {
+      const result = await apiRequest("/api/records", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(record),
+      });
 
-    if (!result.configured) {
-      setLiveMessage(
-        "Gmail OAuth is not configured yet. Add your Google client ID and secret to .env, then restart the server.",
-        "warning",
-      );
-      connectGmailButton.disabled = true;
-      syncNowButton.disabled = true;
-      return;
-    }
-
-    connectGmailButton.disabled = false;
-    syncNowButton.disabled = accounts.length === 0;
-
-    if (accounts.length) {
-      setLiveMessage("Auto-sync checks connected Gmail inboxes every minute.", "success");
-      startAutoSync();
+      mergeServerRecords([result.record]);
     } else {
-      setLiveMessage("Connect Gmail to start extracting live booking emails.", "neutral");
-      stopAutoSync();
+      records.unshift(record);
+      persistLocalRecords();
     }
-  } catch {
-    apiAvailable = false;
-    accounts = [];
-    renderAccounts();
-    connectGmailButton.disabled = true;
-    syncNowButton.disabled = true;
-    setLiveMessage(
-      "Live inbox sync needs the local Node server. Run npm start, then open http://localhost:4173/.",
-      "warning",
-    );
-  }
-}
 
-function connectGmail() {
-  if (!apiAvailable) {
-    setLiveMessage(
-      "Start the local Node server before connecting Gmail.",
-      "warning",
-    );
-    return;
-  }
-
-  window.location.href = "/auth/google/start";
-}
-
-async function syncAccounts({ manual = false } = {}) {
-  if (!apiAvailable || accounts.length === 0) {
-    setLiveMessage("Connect at least one Gmail account before syncing.", "warning");
-    return;
-  }
-
-  syncNowButton.disabled = true;
-  setLiveMessage("Checking connected inboxes for new booking emails...", "neutral");
-
-  try {
-    const result = await apiRequest("/api/sync", { method: "POST" });
-    accounts = result.accounts || accounts;
-
-    const mergeResult = mergeIncomingRecords(result.records || []);
-    renderAccounts();
     renderRecords();
 
-    if (mergeResult.latestRecord) {
-      renderLatestBooking(mergeResult.latestRecord, true);
-    }
+    const subjectNote = parsed.subjectMatched
+      ? "Subject matched."
+      : "Subject line was not found, but the booking fields were collected.";
 
-    const errorMessage = formatSyncErrors(result.errors || []);
-
-    if (mergeResult.added > 0) {
-      setLiveMessage(
-        `Synced ${mergeResult.added} new booking email${mergeResult.added === 1 ? "" : "s"}.${errorMessage}`,
-        result.errors?.length ? "warning" : "success",
-      );
-    } else if (mergeResult.updated > 0) {
-      setLiveMessage(
-        `No new bookings. Refreshed ${mergeResult.updated} existing booking record${mergeResult.updated === 1 ? "" : "s"}.${errorMessage}`,
-        result.errors?.length ? "warning" : "success",
-      );
-    } else {
-      setLiveMessage(
-        `No matching booking emails found${manual ? " right now" : ""}.${errorMessage}`,
-        result.errors?.length ? "warning" : "neutral",
-      );
-    }
+    setMessage(`${subjectNote} Booking details added to the tracker.`, "success");
   } catch (error) {
-    setLiveMessage(error.message || "Inbox sync failed.", "warning");
-  } finally {
-    syncNowButton.disabled = accounts.length === 0;
+    setMessage(error.message || "Could not save that booking record.", "warning");
   }
 }
 
-async function disconnectAccount(accountId) {
-  const account = accounts.find((storedAccount) => storedAccount.id === accountId);
-  const confirmed = window.confirm(
-    `Disconnect ${account?.email || "this email account"}?`,
-  );
-
-  if (!confirmed) {
+async function refreshServerRecords({ silent = true } = {}) {
+  if (!apiAvailable || refreshInFlight) {
     return;
   }
 
+  refreshInFlight = true;
+
+  if (!silent) {
+    setAutomationMessage("Refreshing booking records from the server...", "neutral");
+  }
+
   try {
-    const result = await apiRequest(`/api/accounts/${accountId}/disconnect`, {
-      method: "DELETE",
-    });
+    const result = await apiRequest("/api/records");
+    const mergeResult = mergeServerRecords(result.records || []);
 
-    accounts = result.accounts || [];
-    renderAccounts();
-    syncNowButton.disabled = accounts.length === 0;
-    setLiveMessage("Email account disconnected.", "success");
+    if (mergeResult.latestRecord) {
+      renderLatestBooking(mergeResult.latestRecord, hasBookingDetails(mergeResult.latestRecord));
+    }
 
-    if (!accounts.length) {
-      stopAutoSync();
+    renderRecords();
+
+    if (!silent) {
+      if (mergeResult.added > 0) {
+        setAutomationMessage(
+          `Fetched ${mergeResult.added} new booking record${mergeResult.added === 1 ? "" : "s"}.`,
+          "success",
+        );
+      } else {
+        setAutomationMessage("Records are up to date.", "success");
+      }
     }
   } catch (error) {
-    setLiveMessage(error.message || "Could not disconnect that account.", "warning");
+    if (!silent) {
+      setAutomationMessage(error.message || "Could not refresh server records.", "warning");
+    }
+  } finally {
+    refreshInFlight = false;
   }
 }
 
-function mergeIncomingRecords(incomingRecords) {
+function startAutoRefresh() {
+  if (refreshTimer) {
+    return;
+  }
+
+  refreshTimer = window.setInterval(() => {
+    refreshServerRecords({ silent: true });
+  }, refreshIntervalMs);
+}
+
+function stopAutoRefresh() {
+  if (!refreshTimer) {
+    return;
+  }
+
+  window.clearInterval(refreshTimer);
+  refreshTimer = null;
+}
+
+function mergeServerRecords(serverRecords) {
   let added = 0;
   let updated = 0;
   let latestRecord = null;
 
-  incomingRecords.forEach((incomingRecord) => {
+  serverRecords.forEach((incomingRecord) => {
     const sourceId = incomingRecord.sourceId || incomingRecord.id;
     const existingRecord = records.find(
       (record) => (record.sourceId || record.id) === sourceId,
     );
 
     if (!existingRecord) {
-      const record = {
+      const record = normalizeLocalRecord({
         ...incomingRecord,
-        status: normalizePaymentStatus(incomingRecord.status),
-      };
-
+        serverStored: true,
+      });
       records.unshift(record);
       added += 1;
 
@@ -259,15 +252,17 @@ function mergeIncomingRecords(incomingRecords) {
       return;
     }
 
-    Object.assign(existingRecord, {
+    Object.assign(existingRecord, normalizeLocalRecord({
       ...existingRecord,
       ...incomingRecord,
-      status: normalizePaymentStatus(existingRecord.status || incomingRecord.status),
-    });
+      serverStored: true,
+      status: existingRecord.status || incomingRecord.status,
+    }));
     updated += 1;
   });
 
-  saveRecords();
+  sortRecords();
+  persistLocalRecords();
 
   return {
     added,
@@ -276,9 +271,9 @@ function mergeIncomingRecords(incomingRecords) {
   };
 }
 
-function renderLatestBooking(values, hasBookingDetails) {
+function renderLatestBooking(values, hasBooking) {
   bookingDetailsOutput.value = formatBookingDetails(values);
-  copyDetailsButton.disabled = !hasBookingDetails;
+  copyDetailsButton.disabled = !hasBooking;
 }
 
 function resetPreview() {
@@ -298,44 +293,36 @@ async function copyBookingDetails() {
     await copyTextToClipboard(text);
     setMessage("Booking details copied.", "success");
   } catch {
-    copyBookingDetailsWithFallback();
     setMessage("Booking details copied.", "success");
   }
 }
 
-function copyBookingDetailsWithFallback() {
+async function copyAutomationValue(value, successMessage) {
+  if (!value || /Loading|Run npm start|Unavailable|Starts when/.test(value)) {
+    setAutomationMessage("That value is not ready to copy yet.", "warning");
+    return;
+  }
+
+  try {
+    await copyTextToClipboard(value);
+    setAutomationMessage(successMessage, "success");
+  } catch {
+    setAutomationMessage(successMessage, "success");
+  }
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const previousText = bookingDetailsOutput.value;
+  bookingDetailsOutput.value = text;
   bookingDetailsOutput.focus();
   bookingDetailsOutput.select();
   document.execCommand("copy");
-}
-
-function renderAccounts() {
-  accountsList.innerHTML = "";
-  accountsEmpty.classList.toggle("visible", accounts.length === 0);
-
-  accounts.forEach((account) => {
-    const row = document.createElement("div");
-    const meta = document.createElement("div");
-    const title = document.createElement("p");
-    const subtitle = document.createElement("p");
-    const disconnectButton = document.createElement("button");
-
-    row.className = "account-row";
-    meta.className = "account-meta";
-    title.className = "account-title";
-    subtitle.className = "account-subtitle";
-    disconnectButton.className = "danger-button account-action";
-    disconnectButton.type = "button";
-
-    title.textContent = account.email;
-    subtitle.textContent = `${formatProvider(account.provider)} · Last sync: ${formatOptionalDate(account.lastSyncedAt)}`;
-    disconnectButton.textContent = "Disconnect";
-    disconnectButton.addEventListener("click", () => disconnectAccount(account.id));
-
-    meta.append(title, subtitle);
-    row.append(meta, disconnectButton);
-    accountsList.appendChild(row);
-  });
+  bookingDetailsOutput.value = previousText;
 }
 
 function renderRecords() {
@@ -389,11 +376,34 @@ function createStatusCell(record) {
   select.value = normalizePaymentStatus(record.status);
   setStatusSelectClass(select);
 
-  select.addEventListener("change", () => {
-    record.status = select.value;
+  select.addEventListener("change", async () => {
+    const previousStatus = normalizePaymentStatus(record.status);
+    const nextStatus = select.value;
+    record.status = nextStatus;
     setStatusSelectClass(select);
-    saveRecords();
-    setMessage(`Status updated to ${select.value}.`, "success");
+    persistLocalRecords();
+
+    try {
+      if (apiAvailable && record.serverStored) {
+        const result = await apiRequest(`/api/records/${record.id}`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ status: nextStatus }),
+        });
+
+        Object.assign(record, normalizeLocalRecord(result.record));
+      }
+
+      setMessage(`Status updated to ${nextStatus}.`, "success");
+    } catch (error) {
+      record.status = previousStatus;
+      select.value = previousStatus;
+      setStatusSelectClass(select);
+      persistLocalRecords();
+      setMessage(error.message || "Could not update the payment status.", "warning");
+    }
   });
 
   cell.appendChild(select);
@@ -458,7 +468,6 @@ function createRecordMenu(record) {
       await copyTextToClipboard(formatBookingDetails(record));
       setMessage("Booking record copied.", "success");
     } catch {
-      copyBookingDetailsWithFallback();
       setMessage("Booking record copied.", "success");
     }
 
@@ -544,7 +553,7 @@ function exportCsv() {
   setMessage("CSV export ready.", "success");
 }
 
-function clearRecords() {
+async function clearRecords() {
   if (!records.length) {
     return;
   }
@@ -555,12 +564,67 @@ function clearRecords() {
     return;
   }
 
-  records = [];
-  activeRecordMenuId = null;
-  saveRecords();
-  renderRecords();
-  resetPreview();
-  setMessage("Collected records cleared.", "neutral");
+  try {
+    if (apiAvailable) {
+      await Promise.all(
+        records
+          .filter((record) => record.serverStored)
+          .map((record) =>
+            apiRequest(`/api/records/${record.id}`, {
+              method: "DELETE",
+            }),
+          ),
+      );
+    }
+
+    records = [];
+    activeRecordMenuId = null;
+    persistLocalRecords();
+    renderRecords();
+    resetPreview();
+    setMessage("Collected records cleared.", "neutral");
+  } catch (error) {
+    setMessage(error.message || "Could not clear the records.", "warning");
+  }
+}
+
+async function deleteRecord(recordId) {
+  const record = records.find((storedRecord) => storedRecord.id === recordId);
+
+  if (!record) {
+    return;
+  }
+
+  const confirmed = window.confirm("Delete this booking record?");
+
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    if (apiAvailable && record.serverStored) {
+      await apiRequest(`/api/records/${recordId}`, {
+        method: "DELETE",
+      });
+    }
+
+    records = records.filter((storedRecord) => storedRecord.id !== recordId);
+    activeRecordMenuId = null;
+    persistLocalRecords();
+    renderRecords();
+
+    const nextRecord = records.find(hasBookingDetails);
+
+    if (nextRecord) {
+      renderLatestBooking(nextRecord, true);
+    } else {
+      resetPreview();
+    }
+
+    setMessage("Booking record deleted.", "success");
+  } catch (error) {
+    setMessage(error.message || "Could not delete that record.", "warning");
+  }
 }
 
 async function apiRequest(path, options = {}) {
@@ -573,30 +637,11 @@ async function apiRequest(path, options = {}) {
   });
   const body = await response.json().catch(() => ({}));
 
-  if (!response.ok && response.status !== 207) {
+  if (!response.ok) {
     throw new Error(body.message || body.error || response.statusText);
   }
 
   return body;
-}
-
-function startAutoSync() {
-  if (autoSyncTimer) {
-    return;
-  }
-
-  autoSyncTimer = window.setInterval(() => {
-    syncAccounts();
-  }, AUTO_SYNC_INTERVAL_MS);
-}
-
-function stopAutoSync() {
-  if (!autoSyncTimer) {
-    return;
-  }
-
-  window.clearInterval(autoSyncTimer);
-  autoSyncTimer = null;
 }
 
 function handleDocumentClick(event) {
@@ -621,40 +666,6 @@ function handleDocumentKeydown(event) {
   renderRecords();
 }
 
-function handleRedirectMessage() {
-  const url = new URL(window.location.href);
-  const connectedEmail = url.searchParams.get("connected");
-  const error = url.searchParams.get("error");
-
-  if (connectedEmail) {
-    setLiveMessage(`${connectedEmail} connected. Syncing booking emails now.`, "success");
-    window.history.replaceState({}, "", url.pathname);
-    window.setTimeout(() => syncAccounts({ manual: true }), 600);
-    return;
-  }
-
-  if (error) {
-    setLiveMessage(`Gmail connection failed: ${error}`, "warning");
-    window.history.replaceState({}, "", url.pathname);
-  }
-}
-
-function formatSyncErrors(errors) {
-  if (!errors.length) {
-    return "";
-  }
-
-  return ` ${errors.length} account${errors.length === 1 ? "" : "s"} need attention.`;
-}
-
-function formatProvider(provider) {
-  if (provider === "gmail") {
-    return "Gmail";
-  }
-
-  return provider || "Email";
-}
-
 function formatOptionalDate(value) {
   if (!value) {
     return "Never";
@@ -671,16 +682,6 @@ function escapeCsvValue(value = "") {
   return `"${safeValue.replaceAll('"', '""')}"`;
 }
 
-async function copyTextToClipboard(text) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  bookingDetailsOutput.value = text;
-  copyBookingDetailsWithFallback();
-}
-
 function hasBookingDetails(record) {
   return Boolean(
     record.guestName ||
@@ -693,33 +694,35 @@ function hasBookingDetails(record) {
   );
 }
 
-function deleteRecord(recordId) {
-  const record = records.find((storedRecord) => storedRecord.id === recordId);
-
-  if (!record) {
-    return;
+function createRecordId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
   }
 
-  const confirmed = window.confirm("Delete this booking record?");
+  return String(Date.now());
+}
 
-  if (!confirmed) {
-    return;
-  }
+function normalizeLocalRecord(record = {}) {
+  return {
+    ...record,
+    id: record.id || createRecordId(),
+    sourceId: record.sourceId || record.id,
+    serverStored: Boolean(record.serverStored),
+    status: normalizePaymentStatus(record.status),
+  };
+}
 
-  records = records.filter((storedRecord) => storedRecord.id !== recordId);
-  activeRecordMenuId = null;
-  saveRecords();
-  renderRecords();
+function sortRecords() {
+  records.sort((leftRecord, rightRecord) => {
+    const leftDate = Date.parse(
+      leftRecord.receivedAt || leftRecord.collectedAt || leftRecord.bookingDate || 0,
+    );
+    const rightDate = Date.parse(
+      rightRecord.receivedAt || rightRecord.collectedAt || rightRecord.bookingDate || 0,
+    );
 
-  const nextRecord = records.find(hasBookingDetails);
-
-  if (nextRecord) {
-    renderLatestBooking(nextRecord, true);
-  } else {
-    resetPreview();
-  }
-
-  setMessage("Booking record deleted.", "success");
+    return rightDate - leftDate;
+  });
 }
 
 function loadRecords() {
@@ -730,27 +733,15 @@ function loadRecords() {
       return [];
     }
 
-    return storedRecords.map((record, index) => ({
-      ...record,
-      id: record.id || `stored-${Date.now()}-${index}`,
-      sourceId: record.sourceId || record.id || `stored-${Date.now()}-${index}`,
-      status: normalizePaymentStatus(record.status),
-    }));
+    return storedRecords.map(normalizeLocalRecord);
   } catch {
     return [];
   }
 }
 
-function saveRecords() {
+function persistLocalRecords() {
+  sortRecords();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
-}
-
-function createRecordId() {
-  if (typeof crypto !== "undefined" && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-
-  return String(Date.now());
 }
 
 function setMessage(message, type) {
@@ -759,8 +750,8 @@ function setMessage(message, type) {
   parserMessage.classList.toggle("warning", type === "warning");
 }
 
-function setLiveMessage(message, type) {
-  liveMessage.textContent = message;
-  liveMessage.classList.toggle("success", type === "success");
-  liveMessage.classList.toggle("warning", type === "warning");
+function setAutomationMessage(message, type) {
+  automationMessage.textContent = message;
+  automationMessage.classList.toggle("success", type === "success");
+  automationMessage.classList.toggle("warning", type === "warning");
 }

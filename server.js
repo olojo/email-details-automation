@@ -8,6 +8,7 @@ const { URL } = require("node:url");
 const {
   SUBJECT_FILTER,
   parseBookingEmail,
+  normalizePaymentStatus,
 } = require("./parser.js");
 
 loadEnvFile();
@@ -23,8 +24,13 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const GMAIL_SYNC_QUERY =
   process.env.GMAIL_SYNC_QUERY || `subject:"${SUBJECT_FILTER}" newer_than:30d`;
 const GMAIL_MAX_RESULTS = Number(process.env.GMAIL_MAX_RESULTS || 25);
+const AUTO_REFRESH_INTERVAL_MS = Number(
+  process.env.AUTO_REFRESH_INTERVAL_MS || 15_000,
+);
 const DATA_DIR = path.join(__dirname, "data");
+const APP_SETTINGS_FILE = path.join(DATA_DIR, "app-settings.json");
 const ACCOUNTS_FILE = path.join(DATA_DIR, "accounts.json");
+const RECORDS_FILE = path.join(DATA_DIR, "records.json");
 const OAUTH_STATES = new Map();
 const GOOGLE_SCOPES = [
   "openid",
@@ -44,11 +50,42 @@ const server = http.createServer((request, response) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`Booking email app running at http://${HOST}:${PORT}/`);
-  console.log(`Google OAuth redirect URI: ${GOOGLE_REDIRECT_URI}`);
+  console.log(`Zapier webhook URL: ${BASE_URL}/api/zapier/bookings`);
 });
 
 async function handleRequest(request, response) {
   const requestUrl = new URL(request.url, `http://${request.headers.host}`);
+  const recordMatch = requestUrl.pathname.match(/^\/api\/records\/([^/]+)$/);
+
+  if (request.method === "GET" && requestUrl.pathname === "/api/zapier/config") {
+    await handleZapierConfig(response);
+    return;
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/api/zapier/bookings") {
+    await handleZapierBooking(request, requestUrl, response);
+    return;
+  }
+
+  if (request.method === "GET" && requestUrl.pathname === "/api/records") {
+    await handleRecordList(response);
+    return;
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/api/records") {
+    await handleRecordCreate(request, response);
+    return;
+  }
+
+  if (request.method === "PATCH" && recordMatch) {
+    await handleRecordUpdate(recordMatch[1], request, response);
+    return;
+  }
+
+  if (request.method === "DELETE" && recordMatch) {
+    await handleRecordDelete(recordMatch[1], response);
+    return;
+  }
 
   if (request.method === "GET" && requestUrl.pathname === "/api/accounts") {
     const store = await readAccountStore();
@@ -87,6 +124,202 @@ async function handleRequest(request, response) {
   }
 
   await serveStatic(requestUrl, response);
+}
+
+async function handleZapierConfig(response) {
+  sendJson(response, 200, {
+    webhookUrl: `${BASE_URL}/api/zapier/bookings`,
+    secret: await getZapierWebhookSecret(),
+    pollIntervalMs: AUTO_REFRESH_INTERVAL_MS,
+    subjectFilter: SUBJECT_FILTER,
+  });
+}
+
+async function handleZapierBooking(request, requestUrl, response) {
+  const payload = await readRequestBody(request);
+  const providedSecret =
+    request.headers["x-zapier-secret"] ||
+    payload.secret ||
+    requestUrl.searchParams.get("secret") ||
+    "";
+  const expectedSecret = await getZapierWebhookSecret();
+
+  if (!providedSecret || providedSecret !== expectedSecret) {
+    sendJson(response, 401, {
+      error: "invalid_secret",
+      message: "The Zapier webhook secret is missing or invalid.",
+    });
+    return;
+  }
+
+  const subject = firstNonEmpty([
+    payload.subject,
+    payload.email_subject,
+    payload.title,
+  ]);
+  const body = firstNonEmpty([
+    payload.body,
+    payload.plain_body,
+    payload.body_plain,
+    payload.text,
+    payload.html_body,
+    payload.description,
+    payload.raw_email,
+  ]);
+  const accountEmail = firstNonEmpty([
+    payload.account_email,
+    payload.inbox_email,
+    payload.to_email,
+    payload.to,
+  ]);
+  const messageId = firstNonEmpty([
+    payload.message_id,
+    payload.gmail_message_id,
+    payload.email_id,
+    payload.id,
+  ]);
+  const sourceId =
+    firstNonEmpty([payload.source_id, payload.sourceId]) ||
+    createWebhookSourceId({
+      accountEmail,
+      body,
+      messageId,
+      subject,
+    });
+  const receivedAt = normalizeOptionalDate(
+    firstNonEmpty([
+      payload.received_at,
+      payload.receivedAt,
+      payload.date,
+      payload.sent_at,
+      payload.internal_date,
+    ]),
+  );
+  const parsed = parseBookingEmail(`Subject: ${subject}\n\n${body}`);
+
+  if (!parsed.hasAnyField) {
+    sendJson(response, 422, {
+      error: "no_booking_fields",
+      message:
+        "The incoming payload did not include any booking fields the parser could extract.",
+    });
+    return;
+  }
+
+  const store = await readRecordStore();
+  const existingRecord = store.records.find(
+    (record) => record.sourceId === sourceId,
+  );
+  const nextRecord = normalizeRecord({
+    ...existingRecord,
+    ...parsed.values,
+    id: existingRecord?.id || createRecordId(),
+    sourceId,
+    source: "zapier",
+    provider: "zapier",
+    accountEmail,
+    messageId,
+    subjectMatched: parsed.subjectMatched,
+    collectedAt: existingRecord?.collectedAt || new Date().toISOString(),
+    receivedAt:
+      receivedAt || existingRecord?.receivedAt || new Date().toISOString(),
+    status: existingRecord?.status || parsed.values.status,
+  });
+
+  upsertRecord(store.records, nextRecord);
+  await writeRecordStore(store);
+
+  sendJson(response, existingRecord ? 200 : 201, {
+    ok: true,
+    record: nextRecord,
+  });
+}
+
+async function handleRecordList(response) {
+  const store = await readRecordStore();
+  sendJson(response, 200, {
+    records: store.records,
+  });
+}
+
+async function handleRecordCreate(request, response) {
+  const payload = await readRequestBody(request);
+
+  if (!payload || typeof payload !== "object") {
+    sendJson(response, 400, {
+      error: "invalid_payload",
+      message: "The record payload must be a JSON object.",
+    });
+    return;
+  }
+
+  const store = await readRecordStore();
+  const recordId = payload.id || createRecordId();
+  const nextRecord = normalizeRecord({
+    ...payload,
+    id: recordId,
+    source: payload.source || "manual",
+    provider: payload.provider || payload.source || "manual",
+    sourceId:
+      payload.sourceId ||
+      payload.source_id ||
+      `${payload.source || "manual"}:${recordId}`,
+    collectedAt: payload.collectedAt || new Date().toISOString(),
+  });
+
+  upsertRecord(store.records, nextRecord);
+  await writeRecordStore(store);
+
+  sendJson(response, 201, {
+    record: nextRecord,
+  });
+}
+
+async function handleRecordUpdate(recordId, request, response) {
+  const payload = await readRequestBody(request);
+  const store = await readRecordStore();
+  const record = store.records.find((storedRecord) => storedRecord.id === recordId);
+
+  if (!record) {
+    sendJson(response, 404, {
+      error: "not_found",
+      message: "That booking record could not be found.",
+    });
+    return;
+  }
+
+  if (typeof payload.status === "string") {
+    record.status = normalizePaymentStatus(payload.status);
+  }
+
+  record.updatedAt = new Date().toISOString();
+  await writeRecordStore(store);
+
+  sendJson(response, 200, {
+    record: normalizeRecord(record),
+  });
+}
+
+async function handleRecordDelete(recordId, response) {
+  const store = await readRecordStore();
+  const nextRecords = store.records.filter(
+    (storedRecord) => storedRecord.id !== recordId,
+  );
+
+  if (nextRecords.length === store.records.length) {
+    sendJson(response, 404, {
+      error: "not_found",
+      message: "That booking record could not be found.",
+    });
+    return;
+  }
+
+  store.records = nextRecords;
+  await writeRecordStore(store);
+
+  sendJson(response, 200, {
+    ok: true,
+  });
 }
 
 function handleGoogleStart(response) {
@@ -473,6 +706,26 @@ function contentTypeFor(filePath) {
   return contentTypes[extension] || "application/octet-stream";
 }
 
+async function readAppSettings() {
+  try {
+    const contents = await fs.readFile(APP_SETTINGS_FILE, "utf8");
+    const settings = JSON.parse(contents);
+
+    return typeof settings === "object" && settings ? settings : {};
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return {};
+    }
+
+    throw error;
+  }
+}
+
+async function writeAppSettings(settings) {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  await fs.writeFile(APP_SETTINGS_FILE, JSON.stringify(settings, null, 2));
+}
+
 async function readAccountStore() {
   try {
     const contents = await fs.readFile(ACCOUNTS_FILE, "utf8");
@@ -498,6 +751,39 @@ async function writeAccountStore(store) {
   );
 }
 
+async function readRecordStore() {
+  try {
+    const contents = await fs.readFile(RECORDS_FILE, "utf8");
+    const store = JSON.parse(contents);
+
+    return {
+      records: Array.isArray(store.records)
+        ? store.records.map(normalizeRecord).sort(sortRecordsNewest)
+        : [],
+    };
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { records: [] };
+    }
+
+    throw error;
+  }
+}
+
+async function writeRecordStore(store) {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  await fs.writeFile(
+    RECORDS_FILE,
+    JSON.stringify(
+      {
+        records: store.records.map(normalizeRecord).sort(sortRecordsNewest),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 function safeAccount(account) {
   return {
     id: account.id,
@@ -518,6 +804,131 @@ function createAccountId(provider, email) {
     .update(`${provider}:${email.toLowerCase()}`)
     .digest("hex")
     .slice(0, 24);
+}
+
+async function getZapierWebhookSecret() {
+  if (process.env.ZAPIER_WEBHOOK_SECRET) {
+    return process.env.ZAPIER_WEBHOOK_SECRET;
+  }
+
+  const settings = await readAppSettings();
+
+  if (settings.zapierWebhookSecret) {
+    return settings.zapierWebhookSecret;
+  }
+
+  settings.zapierWebhookSecret = crypto.randomBytes(24).toString("hex");
+  await writeAppSettings(settings);
+  return settings.zapierWebhookSecret;
+}
+
+async function readRequestBody(request) {
+  const chunks = [];
+
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  const rawBody = Buffer.concat(chunks).toString("utf8");
+
+  if (!rawBody) {
+    return {};
+  }
+
+  const contentType = String(request.headers["content-type"] || "");
+
+  if (contentType.includes("application/json")) {
+    return JSON.parse(rawBody);
+  }
+
+  if (contentType.includes("application/x-www-form-urlencoded")) {
+    return Object.fromEntries(new URLSearchParams(rawBody));
+  }
+
+  try {
+    return JSON.parse(rawBody);
+  } catch {
+    return Object.fromEntries(new URLSearchParams(rawBody));
+  }
+}
+
+function upsertRecord(records, nextRecord) {
+  const existingIndex = records.findIndex(
+    (record) => record.sourceId === nextRecord.sourceId || record.id === nextRecord.id,
+  );
+
+  if (existingIndex === -1) {
+    records.unshift(normalizeRecord(nextRecord));
+    records.sort(sortRecordsNewest);
+    return;
+  }
+
+  records[existingIndex] = normalizeRecord({
+    ...records[existingIndex],
+    ...nextRecord,
+  });
+  records.sort(sortRecordsNewest);
+}
+
+function normalizeRecord(record = {}) {
+  return {
+    ...record,
+    status: normalizePaymentStatus(record.status),
+    source: record.source || "manual",
+    provider: record.provider || record.source || "manual",
+    sourceId: record.sourceId || record.source_id || record.id,
+    collectedAt: normalizeOptionalDate(record.collectedAt) || new Date().toISOString(),
+    receivedAt: normalizeOptionalDate(record.receivedAt || record.received_at),
+    updatedAt: normalizeOptionalDate(record.updatedAt || record.updated_at),
+  };
+}
+
+function sortRecordsNewest(leftRecord, rightRecord) {
+  const leftDate = Date.parse(leftRecord.receivedAt || leftRecord.collectedAt || 0);
+  const rightDate = Date.parse(
+    rightRecord.receivedAt || rightRecord.collectedAt || 0,
+  );
+
+  return rightDate - leftDate;
+}
+
+function firstNonEmpty(values) {
+  return (
+    values.find(
+      (value) => typeof value === "string" && value.trim().length > 0,
+    )?.trim() || ""
+  );
+}
+
+function normalizeOptionalDate(value) {
+  if (!value) {
+    return "";
+  }
+
+  if (/^\d+$/.test(String(value).trim())) {
+    const numericValue = Number(value);
+    const asTimestamp = numericValue > 10_000_000_000 ? numericValue : numericValue * 1000;
+    return new Date(asTimestamp).toISOString();
+  }
+
+  const parsedValue = Date.parse(String(value));
+  return Number.isNaN(parsedValue) ? "" : new Date(parsedValue).toISOString();
+}
+
+function createWebhookSourceId({ accountEmail, body, messageId, subject }) {
+  if (messageId) {
+    return `zapier:${accountEmail || "unknown"}:${messageId}`;
+  }
+
+  return `zapier:${crypto
+    .createHash("sha256")
+    .update([accountEmail, subject, body].join("\n"))
+    .digest("hex")
+    .slice(0, 24)}`;
+}
+
+function createRecordId() {
+  return crypto.randomUUID();
 }
 
 function pruneOldStates() {

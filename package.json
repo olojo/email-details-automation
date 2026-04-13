@@ -2,9 +2,13 @@
   "name": "email-details-automation",
   "version": "1.0.0",
   "private": true,
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0",
+    "@netlify/functions": "^3.1.8"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check parser.js && node --check app.js"
+    "check": "node --check server.js && node --check parser.js && node --check app.js && node --check netlify/functions/api.mjs"
   }
 }

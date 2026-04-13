@@ -24,30 +24,52 @@
         </div>
       </header>
 
-      <section class="panel inbox-panel" aria-label="Connected inboxes">
+      <section class="panel inbox-panel" aria-label="Zapier automation">
         <div class="table-header">
           <div class="section-heading">
-            <p class="eyebrow">Live inbox sync</p>
-            <h2>Connected email accounts</h2>
+            <p class="eyebrow">Zapier automation</p>
+            <h2>Webhook setup</h2>
           </div>
           <div class="button-row compact">
-            <button class="primary-button" type="button" id="connectGmailButton">
-              Connect Gmail
+            <button class="ghost-button" type="button" id="copyWebhookUrlButton">
+              Copy webhook URL
             </button>
-            <button class="ghost-button" type="button" id="syncNowButton" disabled>
-              Sync now
+            <button class="ghost-button" type="button" id="copySecretButton">
+              Copy secret
+            </button>
+            <button class="primary-button" type="button" id="refreshRecordsButton">
+              Refresh records
             </button>
           </div>
         </div>
 
-        <div class="accounts-list" id="accountsList"></div>
-        <p class="empty-state visible" id="accountsEmpty">
-          No email accounts connected yet.
+        <dl class="automation-list">
+          <div>
+            <dt>Webhook URL</dt>
+            <dd class="automation-value" id="webhookUrlValue">Loading...</dd>
+          </div>
+          <div>
+            <dt>Shared Secret</dt>
+            <dd class="automation-value" id="webhookSecretValue">Loading...</dd>
+          </div>
+          <div>
+            <dt>Zap Trigger</dt>
+            <dd>Gmail in Zapier -> New Email Matching Search</dd>
+          </div>
+          <div>
+            <dt>Filter</dt>
+            <dd class="number-text">subject:"New Public booking link"</dd>
+          </div>
+        </dl>
+
+        <p class="helper-copy">
+          In Zapier, watch the inbox you want, then send the matching email
+          subject, plain body, account email, and message ID to this webhook.
+          The page refreshes records automatically while it is open.
         </p>
 
-        <div class="message-box live-message" id="liveMessage">
-          Start the local server and connect Gmail to extract booking emails
-          automatically.
+        <div class="message-box live-message" id="automationMessage">
+          Loading Zapier webhook settings...
         </div>
       </section>
 
@@ -77,8 +99,8 @@
           </div>
 
           <p class="helper-copy">
-            Works with pasted text or simple HTML email content. Connected Gmail
-            inboxes can sync matching booking emails automatically.
+            Works with pasted text or simple HTML email content. Zapier can also
+            post matching emails into this tracker automatically.
           </p>
         </form>
 

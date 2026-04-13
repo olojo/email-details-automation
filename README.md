@@ -5,7 +5,7 @@ This app extracts booking details from emails with the subject `New Public booki
 It has two modes:
 
 - Paste an email into the page and extract it manually.
-- Connect one or more Gmail accounts and sync matching booking emails automatically while the app is open.
+- Let Zapier forward matching emails into the app automatically through a webhook.
 
 ## Run Locally
 
@@ -19,39 +19,64 @@ Open:
 http://localhost:4173/
 ```
 
-## Connect Gmail
+## Automate With Zapier On Netlify
 
-1. Create a Google Cloud project.
-2. Enable the Gmail API.
-3. Create an OAuth client for a web application.
-4. Add this authorized redirect URI:
+1. Deploy this repo to Netlify.
+
+2. In Netlify project settings, add these environment variables:
 
 ```text
-http://localhost:4173/auth/google/callback
+BASE_URL=https://reeka-internal-tool.netlify.app
+ZAPIER_WEBHOOK_SECRET=replace-with-your-shared-secret
+AUTO_REFRESH_INTERVAL_MS=15000
 ```
 
-5. Create a `.env` file from `.env.example`:
+3. Redeploy the site.
+
+4. Open the app and copy the webhook URL and shared secret from the Zapier automation panel.
+
+5. In Zapier, create a Zap:
+
+- Trigger: Gmail -> New Email Matching Search
+- Search query:
+
+```text
+subject:"New Public booking link"
+```
+
+- Action: Webhooks by Zapier -> POST
+- URL: the webhook URL shown by the app
+- Add a header:
+
+```text
+X-Zapier-Secret: your shared secret
+```
+
+- Send these fields in the body:
+
+```json
+{
+  "subject": "{{Gmail Subject}}",
+  "body": "{{Gmail Body Plain}}",
+  "account_email": "{{Gmail To Email}}",
+  "message_id": "{{Gmail Message ID}}",
+  "received_at": "{{Gmail Date}}"
+}
+```
+
+On Netlify, the `/api/*` routes are served by Netlify Functions, and booking
+records plus the generated webhook secret are stored in Netlify Blobs.
+
+## Local Development
+
+You can still run the local Node version with:
+
+```bash
+npm start
+```
+
+For local-only testing, create a `.env` file from `.env.example`:
 
 ```bash
 cp .env.example .env
-```
-
-6. Add your Google OAuth client values:
-
-```text
-GOOGLE_CLIENT_ID=your-google-oauth-client-id
-GOOGLE_CLIENT_SECRET=your-google-oauth-client-secret
-GOOGLE_REDIRECT_URI=http://localhost:4173/auth/google/callback
-```
-
-7. Restart the server and click `Connect Gmail`.
-
-Connected account tokens are stored locally in `data/accounts.json`. That file is ignored by git.
-
-If you preview through a public tunnel, use that tunnel URL for
-`GOOGLE_REDIRECT_URI` and add the matching callback URL in Google Cloud. For
-example:
-
-```text
-https://your-tunnel-url/auth/google/callback
 ```

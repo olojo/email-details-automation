@@ -255,6 +255,31 @@ button:disabled:hover {
   font-size: 14px;
 }
 
+.automation-list {
+  margin: 0;
+}
+
+.automation-list div {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.72fr) minmax(0, 1.28fr);
+  gap: 16px;
+  align-items: start;
+  border-top: 1px solid var(--line);
+  padding: 14px 0;
+}
+
+.automation-list div:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.automation-value {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
 .accounts-list {
   display: grid;
   gap: 10px;
@@ -608,6 +633,11 @@ td.number-cell {
   .detail-list div {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+
+  .automation-list div {
+    grid-template-columns: 1fr;
+    gap: 6px;
   }
 
   .account-row {
